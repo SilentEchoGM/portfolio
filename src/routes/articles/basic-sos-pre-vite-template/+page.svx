@@ -1,0 +1,330 @@
+# Get Started with Svelte & SOS
+
+This will be a quick and dirty approach to get you to the point where you can experiment on your own with the data that SOS gives access to. We'll be using [Svelte](https://svelte.dev/) to create and build a website that you can load in OBS.
+
+> There was a previous version of this article based on OBS pre 27.2, you can find it [here](./basic-sos-pre-obs-27-2.svx) if you are interested in transpiling for less capable browsers.
+
+### **Preparation**
+
+1. Install [Node](https://nodejs.org/en/download/) (the v16 LTS is what I'm using) and check that running `npm -v` in a terminal gives you a version number.
+2. Install the SOS plugin for Bakkesmod.
+3. Make a folder and open it in your preferred editor (VSCode has the best support for Svelte, so use that or live dangerously).
+
+### **Dependencies**
+
+Alright, first we'll copy and install the SvelteJS template by running the following:
+
+```sh
+npx degit sveltejs/template
+```
+
+and:
+
+```sh
+npm install
+```
+
+### **Connecting to SOS**
+
+In the `src` folder, create a file named `socket.js` and open it in VSCode.
+
+We're going to use the native [WebSocket](https://developer.mozilla.org/en-US/docs/Web/API/WebSocket) api to connect directly to the WebSocket server that SOS creates. The default address is `ws://localhost:49122`
+
+```js
+const socket = new WebSocket("ws://localhost:49122");
+
+socket.onopen = () => {
+  console.log("Connected to SOS.");
+};
+```
+
+It's that simple to connect to SOS. If you have Rocket League or the [SOS Emulator](https://github.com/SilentEchoUK/sos-emulator-electron) open, you can go ahead and try it now by running:
+
+```sh
+npm run dev
+```
+
+That will start the live dev server; any files you save that pass validation will update in the browser without you needing to rerun `npm run dev`. Now that is running, you should see "Connected to SOS" appear in the browser dev tools after you open the given link (the url will be something like http://localhost:8080 or http://localhost:5000).
+
+We probably want to know if SOS disconnects or if the WebSocket has an error so let's add to our `socket.js`:
+
+```js
+socket.onerror = (err) => {
+  console.error("WebSocket error", err);
+};
+```
+
+Most of the time, that error will happen because SOS isn't available to connect to.
+
+### **Getting data from SOS**
+
+Now that we are connecting to SOS successfully, we can start to listen to the messages sent by the WebSocket server. We're going to use a Svelte `writable` store to save the latest message and then use Svelte `derived` stores to make that data available where we need it:
+
+```js
+export const socketMessageStore = writable({
+  event: "default",
+  data: {},
+});
+
+socket.onmessage = ({ data }) => {
+  const parsed = JSON.parse(data);
+  console.log("New msg:", parsed);
+
+  socketMessageStore.set(parsed);
+};
+```
+
+We've added a `writable` store export to our `socket.js` file and then every time a message arrives, we set the store to whatever that message is. There are two interesting things to notice here:
+
+1. Do you see the `JSON.parse` function? That's taking the string that the WebSocket receives and turning it into a JavaScript object that we can use much more easily.
+
+2. We are also using `{ data }` as the parameter to destructure the `data` property from the local message object the WebSocket creates when it receives a message from the WebSocket server.
+
+Now our complete `socket.js` file will look like this:
+
+```js
+import { writable } from "svelte/store";
+
+//Connect to SOS
+const socket = new WebSocket("ws://localhost:49122");
+
+socket.onopen = () => {
+  console.log("Connected to SOS.");
+};
+
+socket.onerror = (err) => {
+  console.error("WebSocket error", err);
+};
+
+//Save the latest received message in a store.
+export const socketMessageStore = writable({
+  event: "default",
+  data: {},
+});
+
+socket.onmessage = ({ data }) => {
+  const parsed = JSON.parse(data);
+  console.log("New msg:", parsed);
+
+  socketMessageStore.set(parsed);
+};
+```
+
+It's best to keep each file to a single task (or a couple of closely related tasks) so we're going to make another file in the `src` folder, named `processor.js`. This is where we will be processing the data we're receiving from the socket.
+
+We'll start by importing the store we created in `socket.js`:
+
+```js
+import { socketMessageStore } from "./socket";
+```
+
+Then we will create a `derived` store that checks if the latest WebSocket message was a `game:update_state` event:
+
+```js
+export const updateState = derived(socketMessageStore, ($msg, set) => {
+  if (!$msg) return;
+
+  if ($msg.event === "game:update_state") {
+    set($msg.data);
+  }
+});
+```
+
+So here, we are providing a Svelte store (`socketMessageStore`) to the `derived` factory function. We also provide a callback function that will run when `socketMessageStore`'s value changes. This callback function has two parameters, the first is the new value of `socketMessageStore` and the second is a function called `set`.
+
+In the callback, we check if the new value actually exists, and then we check if the value's `event` property matches `game:update_state`. If it does, we call the `set` function that was the second parameter of our callback function and give it the `data` property of the WebSocket message.
+
+This gives us a new `derived` store that we're calling `updateState` and exporting it so we can use it elsewhere.
+
+The `updateState` store will be the basis of many of the stores we'll need so let's dive right into one of the most common, the currently targeted player:
+
+```js
+export const targetPlayer = derived(updateState, ($update, set) => {
+  if (!$update) return;
+
+  if ($update.game.hasTarget) {
+    const player = $update.players[$update.game.target];
+    set(player);
+  } else {
+    set({});
+  }
+});
+```
+
+So here, we do basically the same as before except this time:
+
+1. We're passing in the `updateState` store to the `derived` factory function.
+2. In the callback, we are checking `hasTarget` to see if there currently is a target player. If there is, we use the `target` property to index the `players` property. If there isn't a `target` player, we set the store to an empty object.
+3.
+
+So if you have two players in a game, Pike & Grog, and currently the game is focused on Pike, the `target` property will have a string along the lines of `"Pike_1"`.
+
+The `players` property is an object with a structure like this:
+
+```js
+const players = {
+  Pike_1: {
+    boost: 3,
+    name: "Pike",
+    id: "Pike_1"
+  }
+  Grog_2: {
+    boost: 3,
+    name: "Grog",
+    id: "Grog_1"
+  }
+}
+```
+
+By using `$update.players[$update.game.target]` we are saying we want the player object that matches the `target` string, which in this case is Pike's.
+
+Now our `targetPlayer` store will always have the object for the currently spectated player.
+
+Our complete `processor.js` file will look like this:
+
+```js
+import { derived } from "svelte/store";
+import { socketMessageStore } from "./socket";
+
+export const updateState = derived(socketMessageStore, ($msg, set) => {
+  if (!$msg) return;
+
+  if ($msg.event === "game:update_state") {
+    set($msg.data);
+  }
+});
+
+export const targetPlayer = derived(updateState, ($update, set) => {
+  if (!$update) return;
+
+  if ($update.game.hasTarget) {
+    const player = $update.players[$update.game.target];
+    set(player);
+  } else {
+    set({});
+  }
+});
+```
+
+I think it's time to get something moving on the screen in your web browser.
+
+### **Displaying data from SOS**
+
+In the `src` folder, create a new Svelte component by creating a file named `Boost.svelte`. This is where the magic will happen.
+
+In `Boost.svelte` we'll start with the following
+
+```html
+<script>
+  export let percent = 80;
+
+  $: console.log(percent);
+</script>
+```
+
+Here we are saying that this `<Boost>` component can be giving a value that we're calling `percent` and we're going to print the value of `percent` to the console every time it changes.
+
+Now we'll add some very basic HTML elements and styling to the `<Boost>` component so we can make sure that everything is working and updating as expected:
+
+```html
+<div class="boost bg">
+  <div class="boost" style="width: {percent}%" />
+</div>
+
+<style>
+  .boost {
+    position: relative;
+    height: 50px;
+    background-color: pink;
+  }
+  .bg {
+    width: 300px;
+    background-color: #000;
+  }
+</style>
+```
+
+Now, whenever the `percent` value changes, the style of our div with the `"boost"` class will be updated with that new value.
+
+Our complete `Boost.svelte` now looks like this:
+
+```html
+<script>
+  export let percent = 80;
+
+  $: console.log(percent);
+</script>
+
+<div class="boost bg">
+  <div class="boost" style="width: {percent}%" />
+</div>
+
+<style>
+  .boost {
+    position: relative;
+    height: 50px;
+    background-color: pink;
+  }
+  .bg {
+    width: 300px;
+    background-color: #000;
+  }
+</style>
+```
+
+All we need to do is add this `<Boost>` component to our `App.svelte` file in the `src` folder and we'll be ready to test it. `App.svelte` is still full of the template HTML so let's delete all of that and replace it with:
+
+```html
+<script>
+  import Boost from "./Boost.svelte";
+  import { targetPlayer } from "./processor";
+  import { socketMessageStore } from "./socket";
+
+  $: console.log($socketMessageStore);
+</script>
+
+<main>
+  {#if $targetPlayer?.name}
+  <Boost percent="{$targetPlayer.boost}" />
+  {/if}
+</main>
+```
+
+The `{#if $targetPlayer?.name}` does three things:
+
+1. It always has the latest value contained by the `targetPlayer` Svelte store because we have added a `$` to the front. This only works in `.svelte` files.
+1. It checks `$targetPlayer` is not undefined (that's what the `?` before the `.` is doing)
+1. It checks that whatever `$targetPlayer` is, it has a name property that is "truthy" (so not `undefined` or `""`)
+
+If all of that works out, then our `<Boost>` component will be displayed. Notice that we are giving the `percent` value as `$targetPlayer.boost`, hopefully that can explain itself.
+
+Go and check if it works in your web browser!
+
+### Final Step
+
+Finally, we won't be using this Svelte app like a normal website so we need to update the `index.html` file in the `public` folder so that it is using relative paths:
+
+```html
+<link rel="stylesheet" href="./global.css" />
+<link rel="stylesheet" href="./build/bundle.css" />
+
+<script defer src="./build/bundle.js"></script>
+```
+
+Note the `.` before the forward slash in the `href` and `src` attributes.
+
+We're all done! To build your site run:
+
+```sh
+npm run build
+```
+
+and then point an OBS browser source at the `index.html` file in the public folder and you should be seeing a boost bar that updates as the target player's boost changes.
+
+Obviously, there's a lot more work to do before it's a real overlay but now you know:
+
+1. How to make a `writable` Svelte store that always has the latest WebSocket message
+2. How to make a `derived` Svelte store that updates from other Svelte stores.
+3. How to update an HTML element based on a given variable.
+
+There are very few things that I worked on for the RLCS overlay that weren't covered by that list so now it's up to you to experiment with, and explore, the possibilities that Svelte & SOS give you!
